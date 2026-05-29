@@ -1,0 +1,14 @@
+{
+  "name": "yammbo-alerts",
+  "private": true,
+  "description": "CF Worker: VPS healthcheck/backup alert router -> Telegram (replaces n8n site-healthcheck-alert)",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260101.0",
+    "typescript": "^5.6.0"
+  }
+}
