@@ -4,6 +4,11 @@ account_id = "9334bc9af459f2def598dcf32f9ef322"
 compatibility_date = "2026-01-15"
 compatibility_flags = ["nodejs_compat"]
 
+# Stream this worker's trace events to the central yammbo-tail Worker. CF
+# delivers traces even when an invocation is KILLED (exceededCpu/exceededMemory)
+# before the worker's own try/catch can fire — the silent-cron-failure safety net.
+tail_consumers = [{ service = "yammbo-tail" }]
+
 [vars]
 # Telegram destination (yammbo_alerts_bot). chat_id is not secret.
 TELEGRAM_CHAT_ID = "7906560887"
