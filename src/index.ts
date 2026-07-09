@@ -23,30 +23,50 @@ const esc = (s: string): string =>
 function formatAlert(b: Record<string, unknown>): string {
   const kind = String(b.kind ?? 'health').toLowerCase();
   const site = String(b.site ?? 'unknown').slice(0, 80);
-  const status = String(b.status ?? '?').slice(0, 20);
+  const status = String(b.status ?? '?').slice(0, 40);
   const failures = parseInt(String(b.failures ?? 1), 10) || 1;
-  const extra = String(b.extra ?? '').slice(0, 300);
+  const extra = String(b.extra ?? '').slice(0, 600);
   const when = new Date().toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
 
   let header: string;
   let statusLine: string;
+  // Which detail label to use for the status line, and whether to show the
+  // "consecutive failed checks" line (only meaningful for health checks).
+  let statusLabel = 'HTTP';
+  let showFailures = false;
   if (kind === 'backup') {
     const upper = status.toUpperCase();
     if (upper === 'OK') { header = '\u{1F7E2} <b>BACKUP OK</b>'; statusLine = 'OK'; }
     else if (upper === 'RECOVERED') { header = '\u{1F7E2} <b>BACKUP RECOVERED</b>'; statusLine = 'Recovered'; }
     else if (upper === 'LOCAL-ONLY') { header = '\u{1F7E1} <b>BACKUP LOCAL-ONLY</b>'; statusLine = 'Local OK / R2 failed'; }
     else { header = '\u{1F7E0} <b>BACKUP FAILED</b>'; statusLine = upper; }
+    statusLabel = 'Status';
+    showFailures = true; // keep backup output identical to the pre-change format
+  } else if (kind === 'error') {
+    // Application error/log alert (e.g. Laravel error channel).
+    header = '\u{1F7E0} <b>APP ERROR</b>';
+    statusLine = status; // log level: ERROR / CRITICAL / ...
+    statusLabel = 'Level';
+  } else if (kind === 'cookies') {
+    // YouTube global-cookies health.
+    const upper = status.toUpperCase();
+    header = upper === 'OK'
+      ? '\u{1F7E2} <b>YOUTUBE COOKIES OK</b>'
+      : '\u{1F36A} <b>YOUTUBE COOKIES EXPIRED</b>';
+    statusLine = status;
+    statusLabel = 'Status';
   } else {
     header = '\u{1F534} <b>SITE DOWN</b>';
     statusLine = status;
+    statusLabel = 'HTTP';
+    showFailures = true;
   }
 
   const lines = [header, `<b>Site:</b> ${esc(site)}`];
-  if (kind === 'backup') lines.push(`<b>Status:</b> ${esc(statusLine)}`);
-  else lines.push(`<b>HTTP:</b> ${esc(statusLine)}`);
-  lines.push(`<b>Failed checks:</b> ${failures} consecutive`);
+  lines.push(`<b>${statusLabel}:</b> ${esc(statusLine)}`);
+  if (showFailures) lines.push(`<b>Failed checks:</b> ${failures} consecutive`);
   lines.push(`<b>Time:</b> ${when}`);
-  if (extra) lines.push(`<b>Extra:</b> ${esc(extra)}`);
+  if (extra) lines.push(`<b>${kind === 'error' ? 'Message' : 'Extra'}:</b> ${esc(extra)}`);
   return lines.join('\n');
 }
 
