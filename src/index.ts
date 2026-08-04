@@ -55,6 +55,12 @@ function formatAlert(b: Record<string, unknown>): string {
       : '\u{1F36A} <b>YOUTUBE COOKIES EXPIRED</b>';
     statusLine = status;
     statusLabel = 'Status';
+  } else if (kind === 'payment') {
+    // Payment gateway failure (Stripe/PayPal). Money that did not go through,
+    // which does not always surface as an application ERROR.
+    header = '\u{1F4B3} <b>PAYMENT FAILED</b>';
+    statusLine = status; // gateway name / failure code
+    statusLabel = 'Gateway';
   } else {
     header = '\u{1F534} <b>SITE DOWN</b>';
     statusLine = status;
@@ -66,7 +72,7 @@ function formatAlert(b: Record<string, unknown>): string {
   lines.push(`<b>${statusLabel}:</b> ${esc(statusLine)}`);
   if (showFailures) lines.push(`<b>Failed checks:</b> ${failures} consecutive`);
   lines.push(`<b>Time:</b> ${when}`);
-  if (extra) lines.push(`<b>${kind === 'error' ? 'Message' : 'Extra'}:</b> ${esc(extra)}`);
+  if (extra) lines.push(`<b>${kind === 'error' || kind === 'payment' ? 'Message' : 'Extra'}:</b> ${esc(extra)}`);
   return lines.join('\n');
 }
 
