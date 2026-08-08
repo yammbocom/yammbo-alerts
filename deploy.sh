@@ -4,4 +4,5 @@
 set -euo pipefail
 cd /root/repos/yammbo-alerts
 export CLOUDFLARE_API_TOKEN="$(cat /root/.cloudflare-api-token)"
+export CLOUDFLARE_ACCOUNT_ID="$(cat /root/.cloudflare-account-id)"
 npx wrangler deploy "$@"

@@ -1,6 +1,7 @@
 name = "yammbo-alerts"
 main = "src/index.ts"
-account_id = "9334bc9af459f2def598dcf32f9ef322"
+# account_id is intentionally not committed: this repo is public. deploy.sh
+# exports CLOUDFLARE_ACCOUNT_ID at deploy time instead.
 compatibility_date = "2026-01-15"
 compatibility_flags = ["nodejs_compat"]
 
