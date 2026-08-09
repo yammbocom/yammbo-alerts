@@ -55,6 +55,15 @@ function formatAlert(b: Record<string, unknown>): string {
       : '\u{1F36A} <b>YOUTUBE COOKIES EXPIRED</b>';
     statusLine = status;
     statusLabel = 'Status';
+  } else if (kind === 'playback') {
+    // Music playback dependency (YouTube InnerTube search). Not a site outage:
+    // the site stays up, but new tracks stop resolving to a video ID.
+    const upper = status.toUpperCase();
+    header = upper.includes('OK')
+      ? '\u{1F7E2} <b>PLAYBACK OK</b>'
+      : '\u{1F7E0} <b>PLAYBACK FAILING</b>';
+    statusLine = status;
+    statusLabel = 'Status';
   } else if (kind === 'payment') {
     // Payment gateway failure (Stripe/PayPal). Money that did not go through,
     // which does not always surface as an application ERROR.
