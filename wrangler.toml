@@ -18,5 +18,14 @@ TELEGRAM_CHAT_ID = "7906560887"
 # - TELEGRAM_BOT_TOKEN   bot token for @yammbo_alerts_bot
 # - ALERT_PATH           shared secret = legacy n8n webhook path
 
+[[r2_buckets]]
+binding = "BACKUPS"
+bucket_name = "yammbo-backups"
+
+# Dead-man switch: 08:00 UTC, ~4.5h after the 03:30 UTC site-backup.timer
+# window (plenty of margin for the largest tarballs, e.g. web ~637 MB).
+[triggers]
+crons = ["0 8 * * *"]
+
 [observability]
 enabled = true

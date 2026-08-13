@@ -14,7 +14,30 @@ export interface Env {
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_CHAT_ID: string;
   ALERT_PATH: string;
+  BACKUPS: R2Bucket;
 }
+
+// Dead-man switch (scheduled handler, see bottom of file): R2 prefixes that
+// site-backup.sh / site-backup-all.sh are expected to have uploaded into
+// today. A missing or stale prefix means either the timer didn't fire or the
+// script ran and failed to upload — both are silent today, since
+// yammbo-backup-alert.sh only speaks when the script itself runs.
+const EXPECTED_BACKUP_PREFIXES = [
+  'music.yammbo.com/',
+  'pos.yammbo.com/',
+  'store.yammbo.com/',
+  'tv.yammbo.com/',
+  'web.yammbo.com/',
+  'yammboshop.com/',
+  'app.yammbo.com/',
+  'vps-config/',
+  'agent/',
+];
+
+// site-backup.timer runs at 03:30 UTC; this handler runs at 08:00 UTC. 26h
+// tolerates one full missed window plus the RandomizedDelaySec/runtime slop
+// without false-alarming on a backup that's merely running a bit late.
+const MAX_BACKUP_AGE_HOURS = 26;
 
 const esc = (s: string): string =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -85,6 +108,43 @@ function formatAlert(b: Record<string, unknown>): string {
   return lines.join('\n');
 }
 
+/**
+ * Most recent `uploaded` timestamp under `prefix`, or null if the prefix has
+ * no objects at all (missing backup, not just an old one). R2 list() pages
+ * at up to 1000 objects per call and does not guarantee any ordering by
+ * date, so every page has to be scanned rather than trusting the last one.
+ */
+async function newestUpload(bucket: R2Bucket, prefix: string): Promise<Date | null> {
+  let cursor: string | undefined;
+  let newest: Date | null = null;
+  for (;;) {
+    const listing = await bucket.list({ prefix, cursor });
+    for (const obj of listing.objects) {
+      if (!newest || obj.uploaded > newest) newest = obj.uploaded;
+    }
+    if (!listing.truncated) break;
+    cursor = listing.cursor;
+  }
+  return newest;
+}
+
+/** Checks every expected backup prefix, returns a human line per failure. */
+async function checkBackupFreshness(env: Env): Promise<string[]> {
+  const failures: string[] = [];
+  for (const prefix of EXPECTED_BACKUP_PREFIXES) {
+    const newest = await newestUpload(env.BACKUPS, prefix);
+    if (!newest) {
+      failures.push(`${prefix} — no objects found`);
+      continue;
+    }
+    const ageHours = (Date.now() - newest.getTime()) / 3_600_000;
+    if (ageHours > MAX_BACKUP_AGE_HOURS) {
+      failures.push(`${prefix} — last object ${ageHours.toFixed(1)}h old`);
+    }
+  }
+  return failures;
+}
+
 async function sendTelegram(env: Env, text: string): Promise<boolean> {
   const resp = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: 'POST',
@@ -128,5 +188,28 @@ export default {
     const ok = await sendTelegram(env, text);
     if (!ok) return new Response('telegram send failed', { status: 502 });
     return new Response('OK', { status: 200 });
+  },
+
+  /**
+   * Dead-man switch, cron-triggered (see wrangler.toml). Runs outside the
+   * VPS, so it catches both "the timer never fired" and "it fired but
+   * uploaded nothing" — silence in the VPS-side alerter reads as success in
+   * both cases. Silence here is the normal outcome too: only speaks up when
+   * a prefix is actually missing or stale, one message per run, no retries.
+   *
+   * The message text intentionally carries no per-run id/timestamp beyond
+   * the (slow-changing, hour-granularity) staleness age — a unique token per
+   * run would defeat the alert throttle that dedupes by message text.
+   */
+  async scheduled(_controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
+    const failures = await checkBackupFreshness(env);
+    if (failures.length === 0) return; // all prefixes fresh — say nothing
+
+    const lines = [
+      '\u{1F534} <b>BACKUP DEAD-MAN SWITCH</b>',
+      `<b>Missing/stale prefixes:</b> ${failures.length}`,
+      ...failures.map((f) => esc(f)),
+    ];
+    await sendTelegram(env, lines.join('\n'));
   },
 };
