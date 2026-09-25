@@ -22,10 +22,12 @@ export interface Env {
 // today. A missing or stale prefix means either the timer didn't fire or the
 // script ran and failed to upload — both are silent today, since
 // yammbo-backup-alert.sh only speaks when the script itself runs.
+//
+// Keep in sync with the active .conf files in /etc/yammbo-backups.d/. pos and
+// store were retired 2026-09-05 (their .conf renamed .disabled-*); their R2
+// prefixes hold the final decommission tarballs and will never grow again.
 const EXPECTED_BACKUP_PREFIXES = [
   'music.yammbo.com/',
-  'pos.yammbo.com/',
-  'store.yammbo.com/',
   'tv.yammbo.com/',
   'web.yammbo.com/',
   'yammboshop.com/',
