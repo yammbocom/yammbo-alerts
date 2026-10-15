@@ -26,11 +26,11 @@ export interface Env {
 // Keep in sync with the active .conf files in /etc/yammbo-backups.d/. pos and
 // store were retired 2026-09-05 (their .conf renamed .disabled-*); their R2
 // prefixes hold the final decommission tarballs and will never grow again.
+// yammboshop.com was removed 2026-10-16 with no final backup (prefix purged).
 const EXPECTED_BACKUP_PREFIXES = [
   'music.yammbo.com/',
   'tv.yammbo.com/',
   'web.yammbo.com/',
-  'yammboshop.com/',
   'app.yammbo.com/',
   'vps-config/',
   'agent/',
