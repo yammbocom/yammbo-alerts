@@ -17,7 +17,7 @@ TELEGRAM_CHAT_ID = "7906560887"
 VPS_IP = "207.244.250.82"
 # "on" lets the Worker power-cycle the VPS via Contabo when it is down. Any
 # other value = alert only. Needs all four CONTABO_* secrets below.
-AUTO_RESTART = "off"
+AUTO_RESTART = "on"
 
 # Secrets (set via: wrangler secret put <NAME>)
 # - TELEGRAM_BOT_TOKEN      bot token for @yammbo_alerts_bot
