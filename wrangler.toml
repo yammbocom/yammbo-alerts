@@ -13,19 +13,37 @@ tail_consumers = [{ service = "yammbo-tail" }]
 [vars]
 # Telegram destination (yammbo_alerts_bot). chat_id is not secret.
 TELEGRAM_CHAT_ID = "7906560887"
+# Public IP of the VPS (public in DNS): used to find our instance in Contabo.
+VPS_IP = "207.244.250.82"
+# "on" lets the Worker power-cycle the VPS via Contabo when it is down. Any
+# other value = alert only. Needs all four CONTABO_* secrets below.
+AUTO_RESTART = "off"
 
 # Secrets (set via: wrangler secret put <NAME>)
-# - TELEGRAM_BOT_TOKEN   bot token for @yammbo_alerts_bot
-# - ALERT_PATH           shared secret = legacy n8n webhook path
+# - TELEGRAM_BOT_TOKEN      bot token for @yammbo_alerts_bot
+# - ALERT_PATH              shared secret = legacy n8n webhook path
+# - CONTABO_CLIENT_ID       Contabo API credentials (OAuth password grant);
+# - CONTABO_CLIENT_SECRET   all four are needed for AUTO_RESTART to take effect
+# - CONTABO_API_USER
+# - CONTABO_API_PASSWORD
 
 [[r2_buckets]]
 binding = "BACKUPS"
 bucket_name = "yammbo-backups"
 
-# Dead-man switch: 08:00 UTC, ~4.5h after the 03:30 UTC site-backup.timer
-# window (plenty of margin for the largest tarballs, e.g. web ~637 MB).
+# VPS heartbeat (key "hb") and watcher state (key "vps"). Created once with
+# `wrangler kv namespace create yammbo-alerts-STATE`; the id is not secret.
+[[kv_namespaces]]
+binding = "STATE"
+id = "e6a8a8ba44544866b12b50ff01b15870"
+
+# "0 8 * * *": backup dead-man switch, 08:00 UTC, ~4.5h after the 03:30 UTC
+# site-backup.timer window (plenty of margin for the largest tarballs, e.g.
+# web ~637 MB).
+# "*/2 * * * *": external VPS watcher (vpsWatch). scheduled() branches on the
+# exact cron string, so keep these two in sync with src/index.ts.
 [triggers]
-crons = ["0 8 * * *"]
+crons = ["0 8 * * *", "*/2 * * * *"]
 
 [observability]
 enabled = true

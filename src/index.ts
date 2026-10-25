@@ -8,14 +8,40 @@
  *
  * Auth: the request path must equal ALERT_PATH (the legacy n8n webhook path,
  * a shared secret) — keeps the endpoint from being spammed by randoms.
+ *
+ * It is also the external watcher of the VPS: yammbo-autofix on the VPS posts
+ * a `heartbeat` (stored in KV, never sent to Telegram) and a 2-minute cron
+ * probes the sites from outside — see vpsWatch() and src/vps.ts.
  */
+
+import { type VpsObs, decide, actionFailed, hhmm, parseVpsState, validateHeartbeat } from './vps';
+import { actionOutcome, cloudflareIndicator, contaboPower, contaboStatus, hasContaboSecrets, shortError } from './contabo';
 
 export interface Env {
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_CHAT_ID: string;
   ALERT_PATH: string;
   BACKUPS: R2Bucket;
+  STATE: KVNamespace;
+  VPS_IP: string;
+  AUTO_RESTART: string; // "on" enables the Contabo power cycle; anything else = alert only
+  CONTABO_CLIENT_ID?: string;
+  CONTABO_CLIENT_SECRET?: string;
+  CONTABO_API_USER?: string;
+  CONTABO_API_PASSWORD?: string;
 }
+
+// Sites that live on the VPS, probed from outside every 2 minutes. A probe
+// counts as DOWN only for Cloudflare's "origin unreachable" family (52x/530)
+// or a fetch that throws/times out; app-level errors (500, 403 challenge...)
+// are the on-VPS watcher's business.
+const VPS_PROBES = [
+  { name: 'music', url: 'https://music.yammbo.com/' },
+  { name: 'tv', url: 'https://tv.yammbo.com/api/app-tv/version-movil' },
+  { name: 'web', url: 'https://web.yammbo.com/login' },
+  { name: 'app', url: 'https://app.yammbo.com/' },
+];
+const ORIGIN_DOWN_CODES = new Set([520, 521, 522, 523, 524, 525, 526, 530]);
 
 // Dead-man switch (scheduled handler, see bottom of file): R2 prefixes that
 // site-backup.sh / site-backup-all.sh are expected to have uploaded into
@@ -157,8 +183,158 @@ async function sendTelegram(env: Env, text: string): Promise<boolean> {
       parse_mode: 'HTML',
       disable_web_page_preview: true,
     }),
+    signal: AbortSignal.timeout(10_000),
   });
   return resp.ok;
+}
+
+/** One external probe. code is null when the fetch threw or timed out. */
+async function probeSite(p: { name: string; url: string }): Promise<{ name: string; code: number | null }> {
+  const u = new URL(p.url);
+  u.searchParams.set('vpscheck', String(Date.now()));
+  try {
+    // `cache` is honoured by workerd but missing from workers-types' RequestInit.
+    const init: RequestInit & { cache: 'no-store' } = {
+      redirect: 'manual',
+      cache: 'no-store',
+      headers: { 'user-agent': 'yammbo-alerts-vpscheck' },
+      signal: AbortSignal.timeout(10_000),
+    };
+    const resp = await fetch(u.toString(), init);
+    return { name: p.name, code: resp.status };
+  } catch {
+    return { name: p.name, code: null };
+  }
+}
+
+/**
+ * External VPS watcher, runs every 2 minutes. All the judgement lives in the
+ * pure decide() (src/vps.ts); this function only does the I/O around it:
+ * probes, heartbeat/state in KV, Contabo, Telegram.
+ */
+async function vpsWatch(env: Env): Promise<void> {
+  const now = Date.now();
+  const prev = parseVpsState(await env.STATE.get('vps', 'json'));
+  const hb = await env.STATE.get<{ received?: unknown; disabled?: unknown }>('hb', 'json');
+  const hbSeen = !!hb && typeof hb.received === 'number';
+
+  const results = await Promise.all(VPS_PROBES.map(probeSite));
+  const isDown = (r: { code: number | null }): boolean => r.code === null || ORIGIN_DOWN_CODES.has(r.code);
+  const obs: VpsObs = {
+    now,
+    down: results.filter(isDown).map(({ name, code }) => ({ name, code })),
+    up: results.filter((r) => !isDown(r)).map((r) => r.name),
+    hbAge: hbSeen ? now - (hb!.received as number) : null,
+    hbDisabled: hbSeen && hb!.disabled === true,
+    cfIndicator: null,
+    contaboStatus: undefined,
+    autoRestart: env.AUTO_RESTART === 'on' && hasContaboSecrets(env),
+  };
+
+  let d = decide(prev, obs);
+  if (d.needContaboStatus) {
+    // Second phase: only now (a power decision is pending) touch Contabo/CF.
+    const [cf, st] = await Promise.all([
+      cloudflareIndicator(),
+      contaboStatus(env).then(
+        (status) => ({ status, error: undefined as string | undefined }),
+        (e) => ({ status: null, error: shortError(e) }),
+      ),
+    ]);
+    d = decide(prev, { ...obs, cfIndicator: cf, contaboStatus: st.status, contaboError: st.error });
+  }
+
+  const changed = (a: unknown, b: unknown): boolean => JSON.stringify(a) !== JSON.stringify(b);
+  const messages = [...d.messages];
+  let next = d.next;
+  if (d.contaboAction) {
+    // Never forget our own shutdown: the new step (and the recorded cycle) go
+    // to KV BEFORE the Contabo POST, and if that write fails nothing is sent
+    // (the next tick recomputes the same decision from the unchanged state).
+    if (changed(d.next, prev)) await env.STATE.put('vps', JSON.stringify(d.next));
+    try {
+      await contaboPower(env, d.contaboAction);
+      messages.push(...d.actionMessages);
+    } catch (e) {
+      const failed = actionFailed(prev, d.next, d.contaboAction, shortError(e), actionOutcome(e));
+      next = failed.next;
+      messages.push(...failed.messages);
+    }
+    if (changed(next, d.next)) {
+      try {
+        await env.STATE.put('vps', JSON.stringify(next));
+      } catch (e) {
+        // Do not lose the failure announcement because the revert write failed.
+        console.error('vpsWatch: could not persist state after a Contabo failure', e);
+        messages.push('⚠️ No pude guardar el estado tras el fallo de Contabo; el próximo tick puede confundirse.');
+      }
+    }
+  } else if (changed(next, prev)) {
+    // Only on change (KV write budget); persist before announcing.
+    await env.STATE.put('vps', JSON.stringify(next));
+  }
+  for (const m of messages) {
+    try {
+      if (!(await sendTelegram(env, m))) console.error('vpsWatch: telegram rejected a message');
+    } catch (e) {
+      console.error('vpsWatch: telegram send failed', e);
+    }
+  }
+}
+
+// Consecutive vpsWatch() crashes, kept in KV so a permanently broken watcher
+// is not silent: one alert at WATCH_ERR_ALERT_AT failures, one on recovery.
+const WATCH_ERR_KEY = 'watch_err';
+const WATCH_ERR_ALERT_AT = 3;
+interface WatchErr { n: number; since: number; alerted: boolean }
+
+async function trySend(env: Env, text: string): Promise<boolean> {
+  try {
+    return await sendTelegram(env, text);
+  } catch (e) {
+    console.error('telegram send failed', e);
+    return false;
+  }
+}
+
+const watchErrText = (env: Env, since: number, e: unknown): string => {
+  const name = e instanceof Error ? e.name : 'Error';
+  let msg = e instanceof Error ? e.message : String(e);
+  if (env.TELEGRAM_BOT_TOKEN) msg = msg.split(env.TELEGRAM_BOT_TOKEN).join('***');
+  return `\u26A0\uFE0F El vigilante externo (yammbo-alerts) falla desde ${hhmm(since)}: ${esc(name)}: ${esc(msg.slice(0, 120))}`;
+};
+
+/** Runs vpsWatch and tracks consecutive failures; never throws. */
+async function guardedVpsWatch(env: Env): Promise<void> {
+  try {
+    await vpsWatch(env);
+  } catch (e) {
+    console.error('vpsWatch failed', e);
+    let sent = false;
+    try {
+      const cur = await env.STATE.get<WatchErr>(WATCH_ERR_KEY, 'json');
+      const st: WatchErr = { n: (cur?.n ?? 0) + 1, since: cur?.since ?? Date.now(), alerted: cur?.alerted === true };
+      if (st.n >= WATCH_ERR_ALERT_AT && !st.alerted) {
+        sent = await trySend(env, watchErrText(env, st.since, e));
+        st.alerted = sent;
+      }
+      await env.STATE.put(WATCH_ERR_KEY, JSON.stringify(st));
+    } catch (kvErr) {
+      // KV itself is broken, so the counter cannot work: alert at most about
+      // once an hour (the cron fires on even minutes, so minute 0 only).
+      console.error('watch_err counter failed', kvErr);
+      if (!sent && new Date().getUTCMinutes() < 2) await trySend(env, watchErrText(env, Date.now(), e));
+    }
+    return;
+  }
+  try {
+    const cur = await env.STATE.get<WatchErr>(WATCH_ERR_KEY, 'json');
+    if (!cur) return;
+    if (cur.alerted) await trySend(env, '\u{1F7E2} El vigilante externo vuelve a funcionar.');
+    await env.STATE.delete(WATCH_ERR_KEY);
+  } catch (kvErr) {
+    console.error('watch_err reset failed', kvErr);
+  }
 }
 
 export default {
@@ -186,6 +362,15 @@ export default {
       body = { status: 'malformed-payload' };
     }
 
+    // Heartbeat from yammbo-autofix: store it, never alert. Must run before
+    // formatAlert, which turns any unknown kind into "SITE DOWN".
+    if (String(body?.kind ?? '').toLowerCase() === 'heartbeat') {
+      const hb = validateHeartbeat(body);
+      if (!hb) return new Response('invalid heartbeat', { status: 400 });
+      await env.STATE.put('hb', JSON.stringify({ received: Date.now(), ...hb }));
+      return new Response(null, { status: 204 });
+    }
+
     const text = formatAlert(body);
     const ok = await sendTelegram(env, text);
     if (!ok) return new Response('telegram send failed', { status: 502 });
@@ -193,6 +378,9 @@ export default {
   },
 
   /**
+   * Cron-triggered. The 2-minute cron runs the external VPS watcher; the
+   * daily 08:00 UTC one is the backup dead-man switch described below.
+   *
    * Dead-man switch, cron-triggered (see wrangler.toml). Runs outside the
    * VPS, so it catches both "the timer never fired" and "it fired but
    * uploaded nothing" — silence in the VPS-side alerter reads as success in
@@ -203,7 +391,16 @@ export default {
    * the (slow-changing, hour-granularity) staleness age — a unique token per
    * run would defeat the alert throttle that dedupes by message text.
    */
-  async scheduled(_controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
+  async scheduled(controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
+    if (controller.cron === '*/2 * * * *') {
+      await guardedVpsWatch(env);
+      return;
+    }
+    if (controller.cron !== '0 8 * * *') {
+      console.error('scheduled: unknown cron', controller.cron);
+      return;
+    }
+
     const failures = await checkBackupFreshness(env);
     if (failures.length === 0) return; // all prefixes fresh — say nothing
 
